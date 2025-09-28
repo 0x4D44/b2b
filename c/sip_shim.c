@@ -335,3 +335,175 @@ const char* brs_codecs_csv(void)
     }
     return buf;
 }
+
+// --------------------- MIXER (bridge) ----------------------
+static struct ua *g_mx_in = NULL;   // inbound UA (server)
+static struct ua *g_mx_out = NULL;  // outbound UA (client)
+static struct aubuf *g_mx_ab = NULL; // bridge buffer (S16LE @ 8k/mono)
+static struct ausrc *g_mx_src = NULL; // ausrc for outbound leg
+static uint32_t g_mx_srate = 8000;
+static uint8_t  g_mx_ch = 1;
+static uint32_t g_mx_ptime = 20;
+static size_t   g_mx_sampc = 160;
+
+struct mx_src_st {
+    struct ausrc_prm prm;
+    ausrc_read_h *rh;
+    ausrc_error_h *errh;
+    void *arg;
+    bool run;
+    thrd_t th;
+};
+
+static int mx_src_thread(void *arg)
+{
+    struct mx_src_st *st = arg;
+    int16_t *sampv = mem_alloc(g_mx_sampc * sizeof(int16_t), NULL);
+    if (!sampv) return ENOMEM;
+    uint64_t next = tmr_jiffies();
+    while (st->run) {
+        uint64_t now = tmr_jiffies();
+        if (now + 1 < next) { sys_msleep((unsigned)(next - now)); continue; }
+        do {
+            struct auframe af;
+            auframe_init(&af, AUFMT_S16LE, sampv, g_mx_sampc, g_mx_srate, g_mx_ch);
+            if (g_mx_ab) aubuf_read_auframe(g_mx_ab, &af); else memset(sampv, 0, g_mx_sampc * sizeof(int16_t));
+            st->rh(&af, st->arg);
+            next += g_mx_ptime;
+            now = tmr_jiffies();
+        } while (next <= now);
+    }
+    mem_deref(sampv);
+    return 0;
+}
+
+static void mx_src_destructor(void *arg)
+{
+    struct mx_src_st *st = arg;
+    st->run = false;
+    if (st->th) thrd_join(st->th, NULL);
+}
+
+static int mx_src_alloc(struct ausrc_st **stp, const struct ausrc *as,
+                        struct ausrc_prm *prm, const char *device,
+                        ausrc_read_h *rh, ausrc_error_h *errh, void *arg)
+{
+    (void)as; (void)device;
+    if (!stp || !prm || !rh) return EINVAL;
+    struct mx_src_st *st = mem_zalloc(sizeof(*st), mx_src_destructor);
+    if (!st) return ENOMEM;
+    st->prm = *prm; st->rh = rh; st->errh = errh; st->arg = arg; st->run = true;
+    g_mx_srate = prm->srate ? prm->srate : g_mx_srate;
+    g_mx_ch = prm->ch ? prm->ch : g_mx_ch;
+    g_mx_ptime = prm->ptime ? prm->ptime : g_mx_ptime;
+    g_mx_sampc = (g_mx_srate * g_mx_ch * g_mx_ptime) / 1000;
+    if (!g_mx_ab) { (void)aubuf_alloc(&g_mx_ab, 0, 0); }
+    if (0 != thread_create_name(&st->th, "mx_src", mx_src_thread, st)) { mem_deref(st); return ENOMEM; }
+    *stp = (struct ausrc_st *)st; return 0;
+}
+
+// Mixer inbound decode tap: append received PCM to bridge buffer
+static struct aufilt g_mix_tap;
+
+static int mix_decupd(struct aufilt_dec_st **stp, void **ctx, const struct aufilt *af,
+                      struct aufilt_prm *prm, const struct audio *au)
+{
+    (void)ctx; (void)af; (void)au;
+    struct b2b_dec_st *st = mem_zalloc(sizeof(*st), NULL);
+    if (!st) return ENOMEM;
+    *stp = (struct aufilt_dec_st *)st;
+    g_mx_srate = prm->srate ? prm->srate : g_mx_srate;
+    g_mx_ch = prm->ch ? prm->ch : g_mx_ch;
+    return 0;
+}
+
+static int mix_dech(struct aufilt_dec_st *st, struct auframe *af)
+{
+    (void)st;
+    if (!af) return 0;
+    if (!g_mx_ab) { (void)aubuf_alloc(&g_mx_ab, 0, 0); }
+    // Ensure format is S16LE; if not, baresip auconv should convert before tap
+    if (af->fmt != AUFMT_S16LE) return 0;
+    (void)aubuf_write_auframe(g_mx_ab, af);
+    return 0;
+}
+
+static void reg_mix_filter(void)
+{
+    memset(&g_mix_tap, 0, sizeof(g_mix_tap));
+    g_mix_tap.name = "b2b_mix_tap";
+    g_mix_tap.decupdh = mix_decupd;
+    g_mix_tap.dech = mix_dech;
+    aufilt_register(baresip_aufiltl(), &g_mix_tap);
+}
+
+int sip_mixer_init(const char* bind_addr, const char* target_uri,
+                   uint32_t srate, uint8_t ch, uint32_t ptime_ms)
+{
+    int err = 0;
+    g_role = "MIX ";
+    g_log.h = log_adapter;
+    log_register_handler(&g_log);
+    log_enable_stdout(false); log_enable_timestamps(false); log_enable_color(false); log_enable_info(false);
+
+    g_mx_srate = srate ? srate : g_mx_srate;
+    g_mx_ch = ch ? ch : g_mx_ch;
+    g_mx_ptime = ptime_ms ? ptime_ms : g_mx_ptime;
+    g_mx_sampc = (g_mx_srate * g_mx_ch * g_mx_ptime) / 1000;
+
+    // Configure listen + buffers similar to sink
+    err |= configure(bind_addr);
+
+    // Register inbound decode tap and outbound ausrc
+    reg_mix_filter();
+    if (!g_mx_src) {
+        err |= ausrc_register(&g_mx_src, baresip_ausrcl(), "b2b_mx_src", mx_src_alloc);
+    }
+
+    // Inbound UA: catchall + auto-answer
+    if (!g_mx_in) {
+        err |= ua_alloc(&g_mx_in, "sip:anon@0.0.0.0;regint=0;catchall=yes;audio_codecs=pcmu");
+        if (err) return err;
+        (void)ua_set_autoanswer_value(g_mx_in, "yes"); ua_set_catchall(g_mx_in, true);
+    }
+    // Use shared auto-answer tick on inbound UA
+    g_ua = g_mx_in;
+    tmr_start(&g_aa_tmr, 50, aa_tick, NULL);
+
+    // Outbound UA: dial target and use our ausrc
+    if (!g_mx_out) {
+        err |= ua_alloc(&g_mx_out, "sip:anon@0.0.0.0;regint=0;audio_codecs=pcmu");
+        if (err) return err;
+    }
+    if (target_uri && *target_uri) {
+        // Ensure outbound leg uses our bridge ausrc
+        char abuf[256];
+        re_snprintf(abuf, sizeof(abuf),
+            "audio_source\t\tb2b_mx_src,\n"
+            "ausrc_srate\t\t%u\n"
+            "ausrc_channels\t\t%u\n"
+            "ausrc_format\t\ts16\n",
+            g_mx_srate, g_mx_ch);
+        err |= conf_configure_buf((const uint8_t*)abuf, strlen(abuf));
+        struct call *call = NULL;
+        // Derive from-address similar to source leg
+        char from[128] = {0};
+        const char* p = target_uri; if (0 == strncmp(p, "sip:", 4)) p += 4; const char* host = p;
+        const char* at = strchr(host, '@'); if (at) host = at + 1; const char* last_colon = strrchr(host, ':');
+        size_t host_len = last_colon ? (size_t)(last_colon - host) : strlen(host);
+        if (host_len > sizeof(from) - 16) host_len = sizeof(from) - 16; memcpy(from, "sip:anon@", 9); memcpy(from + 9, host, host_len); from[9 + host_len] = '\0';
+        err |= ua_connect(g_mx_out, &call, from, target_uri, VIDMODE_OFF);
+    }
+    return err;
+}
+
+int sip_mixer_shutdown(void)
+{
+    if (g_mx_out) { ua_destroy(g_mx_out); g_mx_out = NULL; }
+    if (g_mx_in) { ua_destroy(g_mx_in); g_mx_in = NULL; }
+    if (g_mx_ab) { mem_deref(g_mx_ab); g_mx_ab = NULL; }
+    if (g_mx_src) { mem_deref(g_mx_src); g_mx_src = NULL; }
+    tmr_cancel(&g_aa_tmr);
+    if (g_mix_tap.name) { aufilt_unregister(&g_mix_tap); memset(&g_mix_tap, 0, sizeof(g_mix_tap)); }
+    return 0;
+}

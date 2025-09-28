@@ -10,6 +10,8 @@ unsafe extern "C" {
     fn sip_source_push_pcm(samples: *const i16, nsamples: usize) -> c_int;
     fn sip_source_tx_enable(enable: c_int) -> c_int;
     fn sip_source_shutdown() -> c_int;
+    fn sip_mixer_init(bind_addr: *const c_char, target: *const c_char, srate: u32, ch: u8, ptime_ms: u32) -> c_int;
+    fn sip_mixer_shutdown() -> c_int;
     fn brs_codecs_csv() -> *const c_char;
 }
 
@@ -70,4 +72,18 @@ pub fn codecs_csv() -> String {
         if p.is_null() { return String::new(); }
         std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
     }
+}
+
+pub fn mixer_init(bind_addr: &str, target: &str, srate: u32, ch: u8, ptime_ms: u32) -> Result<()> {
+    let b = std::ffi::CString::new(bind_addr).unwrap();
+    let t = std::ffi::CString::new(target).unwrap();
+    let rc = unsafe { sip_mixer_init(b.as_ptr(), t.as_ptr(), srate, ch, ptime_ms) };
+    if rc != 0 { anyhow::bail!("sip_mixer_init rc={}", rc); }
+    Ok(())
+}
+
+pub fn mixer_shutdown() -> Result<()> {
+    let rc = unsafe { sip_mixer_shutdown() };
+    if rc != 0 { anyhow::bail!("sip_mixer_shutdown rc={}", rc); }
+    Ok(())
 }

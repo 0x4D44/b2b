@@ -40,6 +40,10 @@ pub fn run(args: &Cli) -> Result<()> {
     }
 
     let target = args.target.as_deref().unwrap_or("sip:127.0.0.1:0");
+    {
+        let tag = logging::role_tag("source");
+        logging::println_tag(&tag, &format!("Dialing target: {}", target));
+    }
     sip_shim::source_start(target, 8000, 1, args.ptime_ms)?;
     unsafe { std::env::remove_var("BRS_CONF_BUF"); }
 

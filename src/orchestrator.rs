@@ -27,28 +27,28 @@ pub fn run(args: &Cli) -> Result<()> {
         let mut children = Vec::<(RoleKind, Child)>::new();
         let (tx, rx) = mpsc::channel::<String>();
 
-        // 1) Spawn sink and mixer first
+        // 1) Spawn sink first and wait READY
         if let Some(bind) = topo.sink_bind.as_deref() {
             let extra = vec!["--sip-bind".to_string(), bind.to_string()];
             let (role, mut ch) = spawn_role(RoleKind::Sink, &extra, args)?;
             pipe_child_output(&role, &mut ch, tx.clone());
             children.push((role, ch));
+            let mut expected: HashSet<&'static str> = HashSet::new(); expected.insert("sink");
+            wait_for_ready(&expected, args.ready_ms, &rx);
         }
+
+        // 2) Spawn mixer next (it dials sink), then wait READY
         if let (Some(bind), Some(target)) = (topo.mixer_bind.as_deref(), topo.mixer_target.as_deref()) {
             let mut extra: Vec<String> = vec!["--sip-bind".into(), bind.into(), "--target".into(), target.into()];
             if let Some(seq) = topo.mixer_dtmf_seq.as_deref() { extra.push("--dtmf-seq".into()); extra.push(seq.into()); }
             let (role, mut ch) = spawn_role(RoleKind::Mixer, &extra, args)?;
             pipe_child_output(&role, &mut ch, tx.clone());
             children.push((role, ch));
+            let mut expected: HashSet<&'static str> = HashSet::new(); expected.insert("mixer");
+            wait_for_ready(&expected, args.ready_ms, &rx);
         }
 
-        // 2) Wait for READY from the spawned roles
-        let mut expected: HashSet<&'static str> = HashSet::new();
-        if topo.sink_bind.is_some() { expected.insert("sink"); }
-        if topo.mixer_bind.is_some() && topo.mixer_target.is_some() { expected.insert("mixer"); }
-        wait_for_ready(&expected, args.ready_ms, &rx);
-
-        // 3) Spawn source after others are ready
+        // 3) Spawn source after sink and mixer are ready
         if let Some(target) = topo.source_target.as_deref() {
             let mut extra: Vec<String> = vec!["--target".into(), target.into()];
             if let Some(audio) = topo.source_audio_file.as_deref() {
@@ -82,7 +82,35 @@ fn load_plan(path: &PathBuf) -> Result<PlanTopology> {
         topo.sink_bind = t.get("sink").and_then(|m| m.get("sip_bind")).and_then(|x| x.as_str()).map(|s| s.to_string());
         topo.sink_aplay_cmd = t.get("sink").and_then(|m| m.get("aplay_cmd")).and_then(|x| x.as_str()).map(|s| s.to_string());
     }
+    // Replace placeholders like YOUR_HOST_IP / YOUR_IP in plan values
+    if let Some(ip) = detect_host_ipv4() {
+        let mut replace = |opt: &mut Option<String>| {
+            if let Some(v) = opt.as_mut() {
+                if v.contains("YOUR_HOST_IP") || v.contains("YOUR_IP") {
+                    *v = v.replace("YOUR_HOST_IP", &ip).replace("YOUR_IP", &ip);
+                }
+            }
+        };
+        replace(&mut topo.source_target);
+        replace(&mut topo.mixer_bind);
+        replace(&mut topo.mixer_target);
+        replace(&mut topo.sink_bind);
+    }
     Ok(topo)
+}
+
+fn detect_host_ipv4() -> Option<String> {
+    use std::net::{IpAddr, UdpSocket};
+    let sock = UdpSocket::bind(("0.0.0.0", 0)).ok()?;
+    let _ = sock.connect(("8.8.8.8", 80));
+    if let Ok(addr) = sock.local_addr() {
+        if let IpAddr::V4(ip4) = addr.ip() { return Some(ip4.to_string()); }
+    }
+    let _ = sock.connect(("1.1.1.1", 80));
+    if let Ok(addr) = sock.local_addr() {
+        if let IpAddr::V4(ip4) = addr.ip() { return Some(ip4.to_string()); }
+    }
+    None
 }
 
 fn exe() -> Result<PathBuf> { std::env::current_exe().context("current_exe") }
