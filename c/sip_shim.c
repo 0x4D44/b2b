@@ -42,17 +42,19 @@ static int b2b_src_thread(void *arg)
     while (st->run) {
         if (!g_src_started) { sys_msleep(5); next = tmr_jiffies(); continue; }
         uint64_t now = tmr_jiffies();
-        if (now + 1 < next) { // give 1ms slack
+        if (now + 1 < next) { // sleep until next tick (1ms slack)
             sys_msleep((unsigned)(next - now));
             continue;
         }
-        // catch up if we fell behind
-        while (next <= now) next += g_src_ptime;
-
-        struct auframe af;
-        auframe_init(&af, AUFMT_S16LE, sampv, g_src_sampc, g_src_srate, g_src_ch);
-        aubuf_read_auframe(g_src_ab, &af);
-        st->rh(&af, st->arg);
+        // Produce as many frames as needed to catch up
+        do {
+            struct auframe af;
+            auframe_init(&af, AUFMT_S16LE, sampv, g_src_sampc, g_src_srate, g_src_ch);
+            aubuf_read_auframe(g_src_ab, &af);
+            st->rh(&af, st->arg);
+            next += g_src_ptime;
+            now = tmr_jiffies();
+        } while (next <= now);
     }
     mem_deref(sampv);
     return 0;
@@ -159,7 +161,13 @@ static int configure(const char* bind_addr)
     if (bind_addr && *bind_addr) {
         int n = re_snprintf(buf, sizeof(buf),
                             "sip_listen\t%s\n"
-                            "call_accept\tyes\n",
+                            "call_accept\tyes\n"
+                            // Smoother playout on sink: larger adaptive buffer
+                            "audio_buffer\t80-200\n"
+                            "audio_buffer_mode\tadaptive\n"
+                            // And adaptive RTP jitter buffer (pre-decode)
+                            "audio_jitter_buffer_type\tadaptive\n"
+                            "audio_jitter_buffer_ms\t80-160\n",
                             bind_addr);
         if (n < 0) return EINVAL;
         int rc = conf_configure_buf((const uint8_t*)buf, (size_t)n);
