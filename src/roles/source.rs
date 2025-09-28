@@ -13,28 +13,28 @@ pub fn run(args: &Cli) -> Result<()> {
     // Ensure PCMU (g711) module is loaded before UA init via preloaded config
     unsafe { std::env::set_var("BRS_CONF_BUF", "module\tg711\nmodule\tl16\n"); }
     let ua = UaHandle::init().context("init UA")?;
-    // Register a channel dedicated to readiness wait
-    let (_bridge_ready, rx_ready) = ua.reactor.register_events();
+    // Single event registration; we multiplex for logging and readiness
+    let (_bridge_ev, rx_ev) = ua.reactor.register_events();
     {
         let codecs = crate::sip_shim::codecs_csv();
         let tag = logging::role_tag("source");
         logging::println_tag(&tag, &format!("codecs: {}", codecs));
     }
 
-    // Start filtered event logger BEFORE dialing so we see early milestones.
-    let (_bridge_log, rx_log) = ua.reactor.register_events();
+    // Event processor thread: logs milestones and signals establishment/close
+    let (sig_tx, sig_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     {
         let tag = logging::role_tag("source");
         std::thread::spawn(move || {
-            while let Ok(ev) = rx_log.recv() {
+            while let Ok(ev) = rx_ev.recv() {
                 let kind = format!("{:?}", ev.kind());
                 let text = ev.text.clone().unwrap_or_default();
-                if kind.contains("CALL_LOCAL_SDP") { logging::println_tag(&tag, "SDP: Sent offer"); continue; }
-                if kind.contains("CALL_REMOTE_SDP") { logging::println_tag(&tag, "SDP: Received answer"); continue; }
-                if kind.contains("CALL_PROGRESS") || text.contains("180 Ringing") { logging::println_tag(&tag, "SIP: Ringing (180)"); continue; }
-                if kind.contains("CALL_RTPESTAB") { logging::println_tag(&tag, "RTP: Flow established"); continue; }
-                if kind.contains("CALL_ESTABLISHED") { logging::println_tag(&tag, "SIP: Call established"); continue; }
-                if kind.contains("CALL_CLOSED") { logging::println_tag(&tag, &format!("SIP: Call closed ({})", text)); continue; }
+                if kind.contains("CALL_LOCAL_SDP") { logging::println_tag(&tag, "SDP: Sent offer"); }
+                else if kind.contains("CALL_REMOTE_SDP") { logging::println_tag(&tag, "SDP: Received answer"); }
+                else if kind.contains("CALL_PROGRESS") || text.contains("180 Ringing") { logging::println_tag(&tag, "SIP: Ringing (180)"); }
+                else if kind.contains("CALL_RTPESTAB") { logging::println_tag(&tag, "RTP: Flow established"); }
+                else if kind.contains("CALL_ESTABLISHED") { logging::println_tag(&tag, "SIP: Call established"); let _ = sig_tx.send(Ok(())); }
+                else if kind.contains("CALL_CLOSED") { logging::println_tag(&tag, &format!("SIP: Call closed ({})", text)); let _ = sig_tx.send(Err(text)); }
             }
         });
     }
@@ -46,22 +46,19 @@ pub fn run(args: &Cli) -> Result<()> {
     // Wait for call to be established or closed before declaring READY
     let tag_ready = logging::role_tag("source");
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(10_000);
-    let mut established = false;
-    while std::time::Instant::now() < deadline {
-        if let Ok(ev) = rx_ready.recv_timeout(std::time::Duration::from_millis(200)) {
-            let txt = ev.text.clone().unwrap_or_default();
-            let kind = format!("{:?}", ev.kind());
-            if txt.contains("CALL_ESTABLISHED") || kind.contains("CALL_ESTABLISHED") {
-                established = true;
-                break;
+    let established = loop {
+        let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+        if timeout.is_zero() { break false; }
+        match sig_rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Ok(Ok(())) => break true,
+            Ok(Err(reason)) => {
+                logging::println_tag(&tag_ready, &format!("call setup failed: {}", reason));
+                return Err(anyhow::anyhow!("call setup failed: {}", reason));
             }
-            if txt.contains("CALL_CLOSED") || kind.contains("CALL_CLOSED") {
-                logging::println_tag(&tag_ready, &format!("call setup failed: {}", txt));
-                // Non-zero exit to signal orchestrator
-                return Err(anyhow::anyhow!("call setup failed: {}", txt));
-            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(_) => break false,
         }
-    }
+    };
     if !established {
         return Err(anyhow::anyhow!("call setup timeout waiting for ESTABLISHED"));
     }
@@ -92,6 +89,24 @@ pub fn run(args: &Cli) -> Result<()> {
         thread::sleep(Duration::from_millis(10));
     }
 
+    // Prime C-side aubuf with prebuffer frames but keep TX gated off.
+    {
+        if let Ok(mut q) = queue.lock() {
+            let mut primed = 0usize;
+            while primed < prebuffer_frames && !q.is_empty() {
+                if let Some(frame) = q.get(0) {
+                    let _ = sip_shim::source_push_pcm(frame);
+                }
+                q.remove(0);
+                primed += 1;
+            }
+        }
+    }
+
+    // Small pre-roll to allow remote jitter/rtp to settle
+    std::thread::sleep(std::time::Duration::from_millis(args.preroll_ms as u64));
+    // Enable TX now that buffer is primed
+    let _ = sip_shim::source_tx_enable(true);
     logging::ready_line("source", target, &args.codec, args.ptime_ms);
 
     // Send cadence: push frames to shim at ptime.

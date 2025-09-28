@@ -45,6 +45,10 @@ pub struct Cli {
     #[arg(long, default_value_t = 1000)]
     pub prebuffer_ms: u32,
 
+    /// Delay after call established before sending media
+    #[arg(long, default_value_t = 120)]
+    pub preroll_ms: u32,
+
     #[arg(long, default_value_t = 20)]
     pub ptime_ms: u32,
 

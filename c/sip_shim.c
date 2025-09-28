@@ -22,6 +22,7 @@ static uint32_t g_src_srate = 8000;
 static uint8_t  g_src_ch = 1;
 static uint32_t g_src_ptime = 20;
 static size_t   g_src_sampc = 160; // 20ms @ 8kHz mono
+static volatile bool g_src_started = false;
 
 struct b2b_src_st {
     struct ausrc_prm prm;
@@ -38,6 +39,7 @@ static int b2b_src_thread(void *arg)
     int16_t *sampv = mem_alloc(g_src_sampc * sizeof(int16_t), NULL);
     if (!sampv) return ENOMEM;
     while (st->run) {
+        if (!g_src_started) { sys_msleep(5); continue; }
         struct auframe af;
         auframe_init(&af, AUFMT_S16LE, sampv, g_src_sampc, g_src_srate, g_src_ch);
         aubuf_read_auframe(g_src_ab, &af);
@@ -85,10 +87,15 @@ static int b2b_src_alloc(struct ausrc_st **stp, const struct ausrc *as,
 }
 
 
+struct b2b_dec_st { struct aufilt_dec_st af; };
+
 static int decupd(struct aufilt_dec_st **stp, void **ctx, const struct aufilt *af,
                   struct aufilt_prm *prm, const struct audio *au)
 {
-    (void)stp; (void)ctx; (void)af; (void)prm; (void)au;
+    (void)ctx; (void)af; (void)prm; (void)au;
+    struct b2b_dec_st *st = mem_zalloc(sizeof(*st), NULL);
+    if (!st) return ENOMEM;
+    *stp = (struct aufilt_dec_st *)st;
     return 0;
 }
 
@@ -268,6 +275,12 @@ int sip_source_push_pcm(const int16_t* samples, size_t nsamples)
     int err = aubuf_append_auframe(g_src_ab, mb, &af);
     mem_deref(mb);
     return err;
+}
+
+int sip_source_tx_enable(int enable)
+{
+    g_src_started = enable ? true : false;
+    return 0;
 }
 
 int sip_source_shutdown(void)

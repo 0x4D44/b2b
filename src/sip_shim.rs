@@ -8,6 +8,7 @@ unsafe extern "C" {
     fn sip_preconfigure_listen(bind_addr: *const c_char) -> c_int;
     fn sip_source_start(target: *const c_char, srate: u32, ch: u8, ptime_ms: u32) -> c_int;
     fn sip_source_push_pcm(samples: *const i16, nsamples: usize) -> c_int;
+    fn sip_source_tx_enable(enable: c_int) -> c_int;
     fn sip_source_shutdown() -> c_int;
     fn brs_codecs_csv() -> *const c_char;
 }
@@ -48,6 +49,12 @@ pub fn source_start(target: &str, srate: u32, ch: u8, ptime_ms: u32) -> Result<(
 pub fn source_push_pcm(samples: &[i16]) -> Result<()> {
     let rc = unsafe { sip_source_push_pcm(samples.as_ptr(), samples.len()) };
     if rc != 0 { anyhow::bail!("sip_source_push_pcm rc={}", rc); }
+    Ok(())
+}
+
+pub fn source_tx_enable(on: bool) -> Result<()> {
+    let rc = unsafe { sip_source_tx_enable(if on {1} else {0}) };
+    if rc != 0 { anyhow::bail!("sip_source_tx_enable rc={}", rc); }
     Ok(())
 }
 

@@ -1,12 +1,14 @@
 use crate::{cli::Cli, logging};
 use anyhow::{Context, Result};
 use std::{io::Write, process::{Child, Command, Stdio}};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 static RX_SAMPLES: AtomicU64 = AtomicU64::new(0);
+static FIRST_PCM: AtomicBool = AtomicBool::new(false);
 use crate::{sip::UaHandle, sip_shim};
 
 pub fn run(args: &Cli) -> Result<()> {
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN); }
     let tag = logging::role_tag("sink");
     logging::println_tag(&tag, "init UA + aplay (skeleton)");
 
@@ -47,9 +49,9 @@ pub fn run(args: &Cli) -> Result<()> {
 
     // Wire shim PCM callback to aplay stdin.
     if let Some(stdin) = aplay.stdin.take() {
-        use std::sync::{Arc, Mutex};
-        let writer = Arc::new(Mutex::new(stdin));
-        let writer_cb = writer.clone();
+        use std::sync::Mutex;
+        // Store the ChildStdin in a Box so we can pass a stable pointer to C.
+        let writer: Box<Mutex<std::process::ChildStdin>> = Box::new(Mutex::new(stdin));
         extern "C" fn on_pcm(samples: *const i16, ns: usize, user: *mut std::os::raw::c_void) {
             if samples.is_null() || ns == 0 || user.is_null() { return; }
             let slice = unsafe { std::slice::from_raw_parts(samples, ns) };
@@ -58,12 +60,24 @@ pub fn run(args: &Cli) -> Result<()> {
                 // Convert i16 samples to bytes
                 let ptr = slice.as_ptr() as *const u8;
                 let bytes = unsafe { std::slice::from_raw_parts(ptr, ns * 2) };
-                let _ = w.write_all(bytes);
-                let _ = w.flush();
+                if let Err(e) = w.write_all(bytes) {
+                    // Ignore EPIPE but log once
+                    let ec = e.raw_os_error().unwrap_or(-1);
+                    if FIRST_PCM.load(Ordering::Relaxed) {
+                        let tag = crate::logging::role_tag("sink");
+                        crate::logging::println_tag(&tag, &format!("aplay write error: {}", ec));
+                    }
+                } else {
+                    let _ = w.flush();
+                }
             }
             RX_SAMPLES.fetch_add(ns as u64, Ordering::Relaxed);
+            if !FIRST_PCM.swap(true, Ordering::SeqCst) {
+                let tag = crate::logging::role_tag("sink");
+                crate::logging::println_tag(&tag, &format!("MEDIA: first PCM decoded ({} samples)", ns));
+            }
         }
-        let user_ptr = Arc::into_raw(writer_cb) as *mut _;
+        let user_ptr = Box::into_raw(writer) as *mut _;
         sip_shim::sink_set_pcm_callback(on_pcm, user_ptr)?;
     }
 

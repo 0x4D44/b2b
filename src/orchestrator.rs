@@ -6,6 +6,7 @@ use std::{collections::HashSet, path::PathBuf, process::{Child, Command, Stdio},
 struct PlanTopology {
     source_target: Option<String>,
     source_audio_file: Option<PathBuf>,
+    source_preroll_ms: Option<u32>,
     mixer_bind: Option<String>,
     mixer_target: Option<String>,
     mixer_dtmf_seq: Option<String>,
@@ -74,6 +75,7 @@ fn load_plan(path: &PathBuf) -> Result<PlanTopology> {
     if let Some(t) = v.get("topology") {
         topo.source_target = t.get("source").and_then(|s| s.get("sip_target")).and_then(|x| x.as_str()).map(|s| s.to_string());
         topo.source_audio_file = t.get("source").and_then(|s| s.get("audio_file")).and_then(|x| x.as_str()).map(PathBuf::from);
+        topo.source_preroll_ms = t.get("source").and_then(|s| s.get("preroll_ms")).and_then(|x| x.as_integer()).map(|v| v as u32);
         topo.mixer_bind = t.get("mixer").and_then(|m| m.get("sip_bind")).and_then(|x| x.as_str()).map(|s| s.to_string());
         topo.mixer_target = t.get("mixer").and_then(|m| m.get("sip_target")).and_then(|x| x.as_str()).map(|s| s.to_string());
         topo.mixer_dtmf_seq = t.get("mixer").and_then(|m| m.get("dtmf_seq")).and_then(|x| x.as_str()).map(|s| s.to_string());
@@ -107,6 +109,7 @@ fn spawn_all(topo: &PlanTopology, args: &Cli) -> Result<Vec<(RoleKind, Child)>> 
             extra.push("--audio-file".into());
             extra.push(s);
         }
+        if let Some(pr) = topo.source_preroll_ms { extra.push("--preroll-ms".into()); extra.push(pr.to_string()); }
         procs.push(spawn_role(RoleKind::Source, &extra, args)?);
     }
 
@@ -195,8 +198,22 @@ fn monitor_or_ctrlc(tag: &str, children: &mut Vec<(RoleKind, Child)>, grace_ms: 
         for i in 0..children.len() {
             if let Ok(Some(status)) = children[i].1.try_wait() {
                 let role = children[i].0;
-                let code = status.code().unwrap_or(-1);
-                logging::println_tag(tag, &format!("child {role:?} exited with code {code}; shutting down others"));
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    if let Some(code) = status.code() {
+                        logging::println_tag(tag, &format!("child {role:?} exited with code {code}; shutting down others"));
+                    } else if let Some(sig) = status.signal() {
+                        logging::println_tag(tag, &format!("child {role:?} terminated by signal {} ; shutting down others", sig));
+                    } else {
+                        logging::println_tag(tag, &format!("child {role:?} exited; shutting down others"));
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let code = status.code().unwrap_or(-1);
+                    logging::println_tag(tag, &format!("child {role:?} exited with code {code}; shutting down others"));
+                }
                 shutdown_children(children, grace_ms, kill_ms);
                 return;
             }
