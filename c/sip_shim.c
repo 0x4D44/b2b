@@ -348,12 +348,13 @@ static uint32_t g_mx_ptime = 20;
 static size_t   g_mx_sampc = 160;
 // DTMF/mix state
 static const char *g_mx_dtmf_seq = "123#";
+static char g_mx_dtmf_buf[128];
 static size_t g_mx_dtmf_len = 4;
 static size_t g_mx_dtmf_idx = 0;
 static uint32_t g_mx_dtmf_period_ms = 1000;
 static uint32_t g_mx_dtmf_elapsed_ms = 0;
-static uint32_t g_mx_dtmf_off_ms = 80;     // inter-digit silence within period
-static uint32_t g_mx_dtmf_pause_ms = 1000; // pause for '+' digit
+static uint32_t g_mx_dtmf_off_ms = 50;     // inter-digit silence within period
+static uint32_t g_mx_dtmf_pause_ms = 1200; // pause for '+' digit
 static double g_mx_gain_in = 0.5;    // 0..1
 static double g_mx_gain_dtmf = 0.5;  // 0..1
 static double g_mx_ph1 = 0.0, g_mx_ph2 = 0.0;
@@ -428,10 +429,12 @@ static int mx_src_thread(void *arg)
                 memset(tonev, 0, g_mx_sampc * sizeof(int16_t));
             }
             // Mix inbound + dtmf according to gains
+            const double sumg = g_mx_gain_in + g_mx_gain_dtmf;
+            const double scale = (sumg > 1.0) ? (1.0 / sumg) : 1.0;
             for (size_t i=0;i<g_mx_sampc;i++) {
                 double a = (double)sampv[i] / 32768.0;
                 double b = (double)tonev[i] / 32768.0;
-                double y = g_mx_gain_in * a + g_mx_gain_dtmf * b;
+                double y = scale * (g_mx_gain_in * a + g_mx_gain_dtmf * b);
                 if (y > 1.0) y = 1.0; if (y < -1.0) y = -1.0;
                 int val = (int)(y * 32767.0);
                 if (val > 32767) val = 32767; if (val < -32768) val = -32768;
@@ -580,7 +583,14 @@ int sip_mixer_shutdown(void)
 
 int sip_mixer_config(const char* seq, uint32_t period_ms, float gain_in, float gain_dtmf)
 {
-    if (seq && *seq) { g_mx_dtmf_seq = seq; g_mx_dtmf_len = strlen(seq); }
+    if (seq && *seq) {
+        size_t n = strlen(seq);
+        if (n >= sizeof(g_mx_dtmf_buf)) n = sizeof(g_mx_dtmf_buf) - 1;
+        memcpy(g_mx_dtmf_buf, seq, n);
+        g_mx_dtmf_buf[n] = '\0';
+        g_mx_dtmf_seq = g_mx_dtmf_buf;
+        g_mx_dtmf_len = n;
+    }
     if (period_ms) g_mx_dtmf_period_ms = period_ms;
     if (gain_in < 0.0f) gain_in = 0.0f; if (gain_in > 1.0f) gain_in = 1.0f;
     if (gain_dtmf < 0.0f) gain_dtmf = 0.0f; if (gain_dtmf > 1.0f) gain_dtmf = 1.0f;
