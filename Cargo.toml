@@ -1,0 +1,28 @@
+[package]
+name = "b2b"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+thiserror = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+owo-colors = "4"
+time = { version = "0.3", features = ["macros", "formatting"] }
+ctrlc = "3"
+libc = "0.2"
+symphonia = { version = "0.5", features = ["mp3"] }
+
+# SIP stack (always on)
+baresip = { package = "baresip-rs", version = "0.1" }
+baresip-rs-sys = { version = "0.1", features = ["vendored", "static-link"] }
+
+[build-dependencies]
+cc = { version = "1", features = ["parallel"] }
+
+[patch.crates-io]
+baresip-rs = { path = "vendor/baresip-rs" }
+baresip-rs-sys = { path = "vendor/baresip-rs-sys" }

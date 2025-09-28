@@ -1,0 +1,12 @@
+[topology]
+# Sink runs on all interfaces for container environments.
+sink.sip_bind   = "0.0.0.0:5062"
+# Use a blackhole by default so ALSA is not required. Replace with
+# "aplay -f S16_LE -r 8000 -c 1" if you have ALSA.
+# Play out via ALSA (change device/format if needed).
+sink.aplay_cmd  = "aplay -f S16_LE -r 8000 -c 1 -t raw"
+
+# Replace the IP below with your host/interface IP if different.
+source.sip_target = "sip:172.29.166.112:5062"
+# Adjust or remove if you want to stream silence instead of a file.
+source.audio_file = "./assets/sample.mp3"

@@ -1,0 +1,6 @@
+[env]
+# Make vendored libre/baresip sources available to the -sys build.rs automatically.
+# Paths are relative to this file's directory.
+RE_SRC_DIR = { value = "third_party/src/re", relative = true }
+BARESIP_SRC_DIR = { value = "third_party/src/baresip", relative = true }
+BARESIP_MODULES = "g711;l16"
