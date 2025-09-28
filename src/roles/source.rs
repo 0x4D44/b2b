@@ -1,6 +1,6 @@
 use crate::{cli::Cli, logging, media, sip::UaHandle, sip_shim};
 use anyhow::{Context, Result};
-use std::{sync::{Arc, Mutex}, thread, time::Duration};
+use std::{time::Duration, thread};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static TX_SAMPLES: AtomicU64 = AtomicU64::new(0);
@@ -72,34 +72,17 @@ pub fn run(args: &Cli) -> Result<()> {
     };
 
     let prebuffer_frames = (args.prebuffer_ms as usize / args.ptime_ms as usize).max(1);
-
-    let queue: Arc<Mutex<Vec<Vec<i16>>>> = Arc::new(Mutex::new(Vec::new()));
-    let q_prod = queue.clone();
-    thread::spawn(move || {
-        loop {
-            for f in &frames { if let Ok(mut q) = q_prod.lock() { q.push(f.clone()); } }
-        }
-    });
-
-    // Wait until prebuffer is ready
-    loop {
-        if let Ok(q) = queue.lock() {
-            if q.len() >= prebuffer_frames { break; }
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
+    // Use a cyclic index instead of a producer thread to avoid busy loop
+    let mut idx = 0usize;
 
     // Prime C-side aubuf with prebuffer frames but keep TX gated off.
     {
-        if let Ok(mut q) = queue.lock() {
-            let mut primed = 0usize;
-            while primed < prebuffer_frames && !q.is_empty() {
-                if let Some(frame) = q.get(0) {
-                    let _ = sip_shim::source_push_pcm(frame);
-                }
-                q.remove(0);
-                primed += 1;
-            }
+        let mut primed = 0usize;
+        while primed < prebuffer_frames {
+            let frame = &frames[idx];
+            let _ = sip_shim::source_push_pcm(frame);
+            idx = (idx + 1) % frames.len();
+            primed += 1;
         }
     }
 
@@ -112,18 +95,24 @@ pub fn run(args: &Cli) -> Result<()> {
     // Send cadence: push frames to shim at ptime anchored to a monotonic clock
     let mut next = std::time::Instant::now();
     loop {
-        if let Ok(mut q) = queue.lock() {
-            if !q.is_empty() {
-                if let Some(frame) = q.get(0) {
-                    let _ = sip_shim::source_push_pcm(frame);
-                    TX_SAMPLES.fetch_add(frame.len() as u64, Ordering::Relaxed);
-                }
-                q.remove(0);
-            }
-        }
-        next += Duration::from_millis(args.ptime_ms as u64);
+        // Determine how many frames we need to produce to catch up
         let now = std::time::Instant::now();
-        if next > now { thread::sleep(next - now); } else { next = now; }
+        let mut need = 1usize;
+        while next + Duration::from_millis(args.ptime_ms as u64) <= now {
+            next += Duration::from_millis(args.ptime_ms as u64);
+            need += 1;
+            if need > 5 { break; } // cap catch-up burst
+        }
+        // Produce required frames
+        for _ in 0..need {
+            let frame = &frames[idx];
+            let _ = sip_shim::source_push_pcm(frame);
+            TX_SAMPLES.fetch_add(frame.len() as u64, Ordering::Relaxed);
+            idx = (idx + 1) % frames.len();
+            next += Duration::from_millis(args.ptime_ms as u64);
+        }
+        let now2 = std::time::Instant::now();
+        if next > now2 { thread::sleep(next - now2); }
         // break only on ctrl-c
         if ctrlc_tripped() {
             logging::println_tag(&tag, "Ctrl+C received; shutting down");
