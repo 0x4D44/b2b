@@ -38,13 +38,21 @@ static int b2b_src_thread(void *arg)
     struct b2b_src_st *st = arg;
     int16_t *sampv = mem_alloc(g_src_sampc * sizeof(int16_t), NULL);
     if (!sampv) return ENOMEM;
+    uint64_t next = tmr_jiffies();
     while (st->run) {
-        if (!g_src_started) { sys_msleep(5); continue; }
+        if (!g_src_started) { sys_msleep(5); next = tmr_jiffies(); continue; }
+        uint64_t now = tmr_jiffies();
+        if (now + 1 < next) { // give 1ms slack
+            sys_msleep((unsigned)(next - now));
+            continue;
+        }
+        // catch up if we fell behind
+        while (next <= now) next += g_src_ptime;
+
         struct auframe af;
         auframe_init(&af, AUFMT_S16LE, sampv, g_src_sampc, g_src_srate, g_src_ch);
         aubuf_read_auframe(g_src_ab, &af);
         st->rh(&af, st->arg);
-        sys_msleep(g_src_ptime);
     }
     mem_deref(sampv);
     return 0;

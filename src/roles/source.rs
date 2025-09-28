@@ -109,7 +109,8 @@ pub fn run(args: &Cli) -> Result<()> {
     let _ = sip_shim::source_tx_enable(true);
     logging::ready_line("source", target, &args.codec, args.ptime_ms);
 
-    // Send cadence: push frames to shim at ptime.
+    // Send cadence: push frames to shim at ptime anchored to a monotonic clock
+    let mut next = std::time::Instant::now();
     loop {
         if let Ok(mut q) = queue.lock() {
             if !q.is_empty() {
@@ -120,7 +121,9 @@ pub fn run(args: &Cli) -> Result<()> {
                 q.remove(0);
             }
         }
-        thread::sleep(Duration::from_millis(args.ptime_ms as u64));
+        next += Duration::from_millis(args.ptime_ms as u64);
+        let now = std::time::Instant::now();
+        if next > now { thread::sleep(next - now); } else { next = now; }
         // break only on ctrl-c
         if ctrlc_tripped() {
             logging::println_tag(&tag, "Ctrl+C received; shutting down");
