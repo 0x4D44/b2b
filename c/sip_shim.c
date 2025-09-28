@@ -6,6 +6,7 @@
 #include <rem.h>
 #include <baresip.h>
 #include <stdio.h>
+#include <math.h>
 
 typedef void (*b2b_pcm_cb)(const int16_t* samples, size_t nsamples, void* user);
 
@@ -345,6 +346,18 @@ static uint32_t g_mx_srate = 8000;
 static uint8_t  g_mx_ch = 1;
 static uint32_t g_mx_ptime = 20;
 static size_t   g_mx_sampc = 160;
+// DTMF/mix state
+static const char *g_mx_dtmf_seq = "123#";
+static size_t g_mx_dtmf_len = 4;
+static size_t g_mx_dtmf_idx = 0;
+static uint32_t g_mx_dtmf_period_ms = 1000;
+static uint32_t g_mx_dtmf_elapsed_ms = 0;
+static uint32_t g_mx_dtmf_off_ms = 80;     // inter-digit silence within period
+static uint32_t g_mx_dtmf_pause_ms = 1000; // pause for '+' digit
+static double g_mx_gain_in = 0.5;    // 0..1
+static double g_mx_gain_dtmf = 0.5;  // 0..1
+static double g_mx_ph1 = 0.0, g_mx_ph2 = 0.0;
+static double g_mx_inc1 = 0.0, g_mx_inc2 = 0.0;
 
 struct mx_src_st {
     struct ausrc_prm prm;
@@ -359,7 +372,9 @@ static int mx_src_thread(void *arg)
 {
     struct mx_src_st *st = arg;
     int16_t *sampv = mem_alloc(g_mx_sampc * sizeof(int16_t), NULL);
+    int16_t *tonev = mem_alloc(g_mx_sampc * sizeof(int16_t), NULL);
     if (!sampv) return ENOMEM;
+    if (!tonev) { mem_deref(sampv); return ENOMEM; }
     uint64_t next = tmr_jiffies();
     while (st->run) {
         uint64_t now = tmr_jiffies();
@@ -368,11 +383,66 @@ static int mx_src_thread(void *arg)
             struct auframe af;
             auframe_init(&af, AUFMT_S16LE, sampv, g_mx_sampc, g_mx_srate, g_mx_ch);
             if (g_mx_ab) aubuf_read_auframe(g_mx_ab, &af); else memset(sampv, 0, g_mx_sampc * sizeof(int16_t));
+            // Generate DTMF tone frame with inter-digit pause and '+' as long pause
+            if (g_mx_dtmf_len > 0) {
+                // current digit and timing
+                char d = g_mx_dtmf_seq[g_mx_dtmf_idx % g_mx_dtmf_len];
+                uint32_t period = (d == '+') ? g_mx_dtmf_pause_ms : g_mx_dtmf_period_ms;
+                uint32_t on_ms = (d == '+') ? 0 : (g_mx_dtmf_period_ms > g_mx_dtmf_off_ms ? (g_mx_dtmf_period_ms - g_mx_dtmf_off_ms) : g_mx_dtmf_period_ms);
+                bool tone_on_window = g_mx_dtmf_elapsed_ms < on_ms;
+                // frequencies for current digit (if in on window)
+                double f1 = 0.0, f2 = 0.0;
+                // map digit to frequencies
+                switch (d) {
+                    case '1': f1=697;  f2=1209; break; case '2': f1=697;  f2=1336; break; case '3': f1=697;  f2=1477; break; case 'A': case 'a': f1=697;  f2=1633; break;
+                    case '4': f1=770;  f2=1209; break; case '5': f1=770;  f2=1336; break; case '6': f1=770;  f2=1477; break; case 'B': case 'b': f1=770;  f2=1633; break;
+                    case '7': f1=852;  f2=1209; break; case '8': f1=852;  f2=1336; break; case '9': f1=852;  f2=1477; break; case 'C': case 'c': f1=852;  f2=1633; break;
+                    case '*': f1=941;  f2=1209; break; case '0': f1=941;  f2=1336; break; case '#': f1=941;  f2=1477; break; case 'D': case 'd': f1=941;  f2=1633; break;
+                    default: f1 = 0.0; f2 = 0.0; break;
+                }
+                if (tone_on_window && f1 != 0.0 && f2 != 0.0) {
+                    if (g_mx_inc1 == 0.0 || g_mx_inc2 == 0.0) {
+                        const double PI = 3.14159265358979323846;
+                        g_mx_inc1 = 2.0 * PI * f1 / (double)g_mx_srate;
+                        g_mx_inc2 = 2.0 * PI * f2 / (double)g_mx_srate;
+                    }
+                    for (size_t i=0;i<g_mx_sampc;i++) {
+                        double s = sin(g_mx_ph1) + sin(g_mx_ph2);
+                        g_mx_ph1 += g_mx_inc1; if (g_mx_ph1 > 2.0*M_PI) g_mx_ph1 -= 2.0*M_PI;
+                        g_mx_ph2 += g_mx_inc2; if (g_mx_ph2 > 2.0*M_PI) g_mx_ph2 -= 2.0*M_PI;
+                        // scale to int16 range roughly, tone amplitude 0.5 each summed => clamp
+                        int val = (int)(s * (32767.0 * 0.4));
+                        if (val > 32767) val = 32767; if (val < -32768) val = -32768;
+                        tonev[i] = (int16_t)val;
+                    }
+                } else {
+                    memset(tonev, 0, g_mx_sampc * sizeof(int16_t));
+                }
+                // advance dtmf elapsed and roll to next digit if needed
+                g_mx_dtmf_elapsed_ms += g_mx_ptime;
+                if (g_mx_dtmf_elapsed_ms >= period) {
+                    g_mx_dtmf_elapsed_ms = 0; g_mx_dtmf_idx = (g_mx_dtmf_idx + 1) % (g_mx_dtmf_len ? g_mx_dtmf_len : 1);
+                    g_mx_ph1 = 0.0; g_mx_ph2 = 0.0; g_mx_inc1 = g_mx_inc2 = 0.0;
+                }
+            } else {
+                memset(tonev, 0, g_mx_sampc * sizeof(int16_t));
+            }
+            // Mix inbound + dtmf according to gains
+            for (size_t i=0;i<g_mx_sampc;i++) {
+                double a = (double)sampv[i] / 32768.0;
+                double b = (double)tonev[i] / 32768.0;
+                double y = g_mx_gain_in * a + g_mx_gain_dtmf * b;
+                if (y > 1.0) y = 1.0; if (y < -1.0) y = -1.0;
+                int val = (int)(y * 32767.0);
+                if (val > 32767) val = 32767; if (val < -32768) val = -32768;
+                sampv[i] = (int16_t)val;
+            }
             st->rh(&af, st->arg);
             next += g_mx_ptime;
             now = tmr_jiffies();
         } while (next <= now);
     }
+    mem_deref(tonev);
     mem_deref(sampv);
     return 0;
 }
@@ -505,5 +575,17 @@ int sip_mixer_shutdown(void)
     if (g_mx_src) { mem_deref(g_mx_src); g_mx_src = NULL; }
     tmr_cancel(&g_aa_tmr);
     if (g_mix_tap.name) { aufilt_unregister(&g_mix_tap); memset(&g_mix_tap, 0, sizeof(g_mix_tap)); }
+    return 0;
+}
+
+int sip_mixer_config(const char* seq, uint32_t period_ms, float gain_in, float gain_dtmf)
+{
+    if (seq && *seq) { g_mx_dtmf_seq = seq; g_mx_dtmf_len = strlen(seq); }
+    if (period_ms) g_mx_dtmf_period_ms = period_ms;
+    if (gain_in < 0.0f) gain_in = 0.0f; if (gain_in > 1.0f) gain_in = 1.0f;
+    if (gain_dtmf < 0.0f) gain_dtmf = 0.0f; if (gain_dtmf > 1.0f) gain_dtmf = 1.0f;
+    g_mx_gain_in = (double)gain_in;
+    g_mx_gain_dtmf = (double)gain_dtmf;
+    g_mx_dtmf_idx = 0; g_mx_dtmf_elapsed_ms = 0; g_mx_ph1 = g_mx_ph2 = 0.0; g_mx_inc1 = g_mx_inc2 = 0.0;
     return 0;
 }

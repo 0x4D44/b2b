@@ -12,6 +12,11 @@ sink.aplay_cmd  = "aplay -f S16_LE -r 8000 -c 1 -t raw"
 mixer.sip_bind   = "0.0.0.0:5063"
 # Replace the IP below with your host/interface IP if different
 mixer.sip_target = "sip:YOUR_HOST_IP:5062"
+# Make the DTMF prominent for audibility
+mixer.dtmf_seq = "+442083661177"
+mixer.dtmf_period_ms = 200
+mixer.mix_gain_in = 0.70
+mixer.mix_gain_dtmf = 0.50
 
 # Source dials the Mixer
 source.sip_target = "sip:YOUR_HOST_IP:5063"

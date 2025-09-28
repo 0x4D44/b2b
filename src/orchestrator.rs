@@ -10,6 +10,9 @@ struct PlanTopology {
     mixer_bind: Option<String>,
     mixer_target: Option<String>,
     mixer_dtmf_seq: Option<String>,
+    mixer_dtmf_period_ms: Option<u32>,
+    mixer_gain_in: Option<f32>,
+    mixer_gain_dtmf: Option<f32>,
     sink_bind: Option<String>,
     sink_aplay_cmd: Option<String>,
 }
@@ -41,6 +44,9 @@ pub fn run(args: &Cli) -> Result<()> {
         if let (Some(bind), Some(target)) = (topo.mixer_bind.as_deref(), topo.mixer_target.as_deref()) {
             let mut extra: Vec<String> = vec!["--sip-bind".into(), bind.into(), "--target".into(), target.into()];
             if let Some(seq) = topo.mixer_dtmf_seq.as_deref() { extra.push("--dtmf-seq".into()); extra.push(seq.into()); }
+            if let Some(p) = topo.mixer_dtmf_period_ms { extra.push("--dtmf-period-ms".into()); extra.push(p.to_string()); }
+            if let Some(g) = topo.mixer_gain_in { extra.push("--mix-gain-in".into()); extra.push(format!("{:.3}", g)); }
+            if let Some(g) = topo.mixer_gain_dtmf { extra.push("--mix-gain-dtmf".into()); extra.push(format!("{:.3}", g)); }
             let (role, mut ch) = spawn_role(RoleKind::Mixer, &extra, args)?;
             pipe_child_output(&role, &mut ch, tx.clone());
             children.push((role, ch));
@@ -79,6 +85,9 @@ fn load_plan(path: &PathBuf) -> Result<PlanTopology> {
         topo.mixer_bind = t.get("mixer").and_then(|m| m.get("sip_bind")).and_then(|x| x.as_str()).map(|s| s.to_string());
         topo.mixer_target = t.get("mixer").and_then(|m| m.get("sip_target")).and_then(|x| x.as_str()).map(|s| s.to_string());
         topo.mixer_dtmf_seq = t.get("mixer").and_then(|m| m.get("dtmf_seq")).and_then(|x| x.as_str()).map(|s| s.to_string());
+        topo.mixer_dtmf_period_ms = t.get("mixer").and_then(|m| m.get("dtmf_period_ms")).and_then(|x| x.as_integer()).map(|v| v as u32);
+        topo.mixer_gain_in = t.get("mixer").and_then(|m| m.get("mix_gain_in")).and_then(|x| x.as_float()).map(|v| v as f32);
+        topo.mixer_gain_dtmf = t.get("mixer").and_then(|m| m.get("mix_gain_dtmf")).and_then(|x| x.as_float()).map(|v| v as f32);
         topo.sink_bind = t.get("sink").and_then(|m| m.get("sip_bind")).and_then(|x| x.as_str()).map(|s| s.to_string());
         topo.sink_aplay_cmd = t.get("sink").and_then(|m| m.get("aplay_cmd")).and_then(|x| x.as_str()).map(|s| s.to_string());
     }

@@ -12,6 +12,7 @@ unsafe extern "C" {
     fn sip_source_shutdown() -> c_int;
     fn sip_mixer_init(bind_addr: *const c_char, target: *const c_char, srate: u32, ch: u8, ptime_ms: u32) -> c_int;
     fn sip_mixer_shutdown() -> c_int;
+    fn sip_mixer_config(seq: *const c_char, period_ms: u32, gain_in: f32, gain_dtmf: f32) -> c_int;
     fn brs_codecs_csv() -> *const c_char;
 }
 
@@ -85,5 +86,12 @@ pub fn mixer_init(bind_addr: &str, target: &str, srate: u32, ch: u8, ptime_ms: u
 pub fn mixer_shutdown() -> Result<()> {
     let rc = unsafe { sip_mixer_shutdown() };
     if rc != 0 { anyhow::bail!("sip_mixer_shutdown rc={}", rc); }
+    Ok(())
+}
+
+pub fn mixer_config(seq: &str, period_ms: u32, gain_in: f32, gain_dtmf: f32) -> Result<()> {
+    let c = std::ffi::CString::new(seq).unwrap_or_else(|_| std::ffi::CString::new("123#").unwrap());
+    let rc = unsafe { sip_mixer_config(c.as_ptr(), period_ms, gain_in, gain_dtmf) };
+    if rc != 0 { anyhow::bail!("sip_mixer_config rc={}", rc); }
     Ok(())
 }

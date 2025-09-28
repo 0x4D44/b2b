@@ -46,6 +46,8 @@ pub fn run(args: &Cli) -> Result<()> {
 
     // Start mixer legs: inbound catch-all and outbound dial
     sip_shim::mixer_init(sip, target, 8000, 1, args.ptime_ms)?;
+    // Configure mixing: dtmf sequence and gains
+    sip_shim::mixer_config(&args.dtmf_seq, args.dtmf_period_ms, args.mix_gain_in as f32, args.mix_gain_dtmf as f32)?;
     unsafe { std::env::remove_var("BRS_CONF_BUF"); }
 
     // Event loop: wait for outbound (to Sink) established, then READY
