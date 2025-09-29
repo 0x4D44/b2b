@@ -1,6 +1,13 @@
-use std::{io::{BufRead, BufReader}, process::{Child, ChildStderr, ChildStdout}};
+use std::{
+    io::{BufRead, BufReader},
+    process::{Child, ChildStderr, ChildStdout},
+};
 
-pub fn spawn_reader_thread<R: Send + 'static + std::io::Read>(reader: R, tag: String, mut cb: impl FnMut(String, &str) + Send + 'static) {
+pub fn spawn_reader_thread<R: Send + 'static + std::io::Read>(
+    reader: R,
+    tag: String,
+    mut cb: impl FnMut(String, &str) + Send + 'static,
+) {
     std::thread::spawn(move || {
         let br = BufReader::new(reader);
         for line in br.lines() {

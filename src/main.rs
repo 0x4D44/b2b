@@ -1,12 +1,11 @@
 mod cli;
 mod logging;
+mod media;
 mod orchestrator;
 mod roles;
-mod metrics;
-mod util;
-mod media;
 mod sip;
 mod sip_shim;
+mod util;
 
 use anyhow::Result;
 use clap::Parser;

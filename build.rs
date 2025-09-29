@@ -1,5 +1,4 @@
 fn main() {
-
     // Include headers from vendored sources for convenience, but the shim here
     // is currently a no-op stub that does not depend on them yet. Keep them in
     // place so we can flesh out the implementation without changing build glue.

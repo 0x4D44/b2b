@@ -15,8 +15,11 @@ static void* g_user = 0;
 static struct ua* g_ua = NULL;
 static struct aufilt g_tap;
 static struct tmr g_aa_tmr;
+static struct tmr g_sink_m_tmr;
 static struct log g_log;
 static const char *g_role = NULL;
+// forward decl for sink metrics tick
+static void sink_metrics_tick(void *arg);
 static struct ausrc *g_src = NULL;
 static struct aubuf *g_src_ab = NULL;
 static uint32_t g_src_srate = 8000;
@@ -24,6 +27,7 @@ static uint8_t  g_src_ch = 1;
 static uint32_t g_src_ptime = 20;
 static size_t   g_src_sampc = 160; // 20ms @ 8kHz mono
 static volatile bool g_src_started = false;
+static struct { uint64_t last_ms; uint32_t pkt; uint32_t min_int; uint32_t max_int; } g_src_m;
 
 struct b2b_src_st {
     struct ausrc_prm prm;
@@ -55,6 +59,23 @@ static int b2b_src_thread(void *arg)
             st->rh(&af, st->arg);
             next += g_src_ptime;
             now = tmr_jiffies();
+            /* metrics update */
+            if (g_src_m.last_ms) {
+                uint32_t d = (uint32_t)(now - g_src_m.last_ms);
+                if (g_src_m.min_int == 0 || d < g_src_m.min_int) g_src_m.min_int = d;
+                if (d > g_src_m.max_int) g_src_m.max_int = d;
+            }
+            g_src_m.last_ms = now;
+            g_src_m.pkt++;
+            if ((g_src_m.pkt % 250) == 0) {
+                size_t cur = g_src_ab ? aubuf_cur_size(g_src_ab) : 0;
+                size_t bytes_per_ms = (g_src_srate * g_src_ch * 2) / 1000;
+                uint32_t back_ms = bytes_per_ms ? (uint32_t)(cur / bytes_per_ms) : 0;
+                re_printf("SRC_METRICS5s pkts=250 int_min=%ums int_max=%ums backlog_ms=%u\n",
+                          g_src_m.min_int, g_src_m.max_int, back_ms);
+                fflush(NULL);
+                g_src_m.min_int = 0; g_src_m.max_int = 0;
+            }
         } while (next <= now);
     }
     mem_deref(sampv);
@@ -117,6 +138,11 @@ static int dech(struct aufilt_dec_st *st, struct auframe *af)
         return 0;
     // Deliver mono/8k frames as provided by the audio pipeline
     g_cb((const int16_t*)af->sampv, af->sampc, g_user);
+    // count frames for sink metrics (one decoded frame per 20ms)
+    if (g_role && strcmp(g_role, "SINK") == 0) {
+        extern void sink_metrics_count_frame(void);
+        sink_metrics_count_frame();
+    }
     return 0;
 }
 
@@ -137,6 +163,13 @@ static void log_adapter(uint32_t level, const char *msg)
     (void)re_printf("%s", msg);
     /* ensure line is flushed promptly even when not attached to a TTY */
     fflush(NULL);
+    // crude drop detector for sink
+    if (g_role && strcmp(g_role, "SINK") == 0) {
+        if (strstr(msg, "jbuf: drop")) {
+            extern void sink_metrics_count_drop(void);
+            sink_metrics_count_drop();
+        }
+    }
 }
 
 static void aa_tick(void *arg)
@@ -162,13 +195,7 @@ static int configure(const char* bind_addr)
     if (bind_addr && *bind_addr) {
         int n = re_snprintf(buf, sizeof(buf),
                             "sip_listen\t%s\n"
-                            "call_accept\tyes\n"
-                            // Smoother playout on sink: larger adaptive buffer
-                            "audio_buffer\t80-200\n"
-                            "audio_buffer_mode\tadaptive\n"
-                            // And adaptive RTP jitter buffer (pre-decode)
-                            "audio_jitter_buffer_type\tadaptive\n"
-                            "audio_jitter_buffer_ms\t80-160\n",
+                            "call_accept\tyes\n",
                             bind_addr);
         if (n < 0) return EINVAL;
         int rc = conf_configure_buf((const uint8_t*)buf, (size_t)n);
@@ -203,6 +230,8 @@ int sip_sink_init(const char* bind_addr)
     }
     // Start auto-answer tick
     tmr_start(&g_aa_tmr, 50, aa_tick, NULL);
+    // Start sink metrics tick (5s)
+    tmr_start(&g_sink_m_tmr, 5000, sink_metrics_tick, NULL);
     return err;
 }
 
@@ -212,6 +241,7 @@ int sip_sink_shutdown(void)
 {
     if (g_ua) { ua_destroy(g_ua); g_ua = NULL; }
     tmr_cancel(&g_aa_tmr);
+    tmr_cancel(&g_sink_m_tmr);
     if (g_tap.name) { aufilt_unregister(&g_tap); memset(&g_tap, 0, sizeof(g_tap)); }
     g_cb = 0; g_user = 0;
     return 0;
@@ -305,6 +335,14 @@ int sip_source_shutdown(void)
     if (g_src) { mem_deref(g_src); g_src = NULL; }
     if (g_src_ab) { mem_deref(g_src_ab); g_src_ab = NULL; }
     return 0;
+}
+int sip_source_backlog_ms(void)
+{
+    if (!g_src_ab) return 0;
+    size_t cur = aubuf_cur_size(g_src_ab);
+    size_t bytes_per_ms = (g_src_srate * g_src_ch * 2) / 1000;
+    if (!bytes_per_ms) return 0;
+    return (int)(cur / bytes_per_ms);
 }
 int sip_preconfigure_listen(const char* bind_addr)
 {
@@ -598,4 +636,20 @@ int sip_mixer_config(const char* seq, uint32_t period_ms, float gain_in, float g
     g_mx_gain_dtmf = (double)gain_dtmf;
     g_mx_dtmf_idx = 0; g_mx_dtmf_elapsed_ms = 0; g_mx_ph1 = g_mx_ph2 = 0.0; g_mx_inc1 = g_mx_inc2 = 0.0;
     return 0;
+}
+// sink metrics counters
+static struct { uint32_t frames1s; uint32_t drops1s; } g_sink_m;
+
+void sink_metrics_count_frame(void) { g_sink_m.frames1s++; }
+void sink_metrics_count_drop(void) { g_sink_m.drops1s++; }
+
+static void sink_metrics_tick(void *arg)
+{
+    (void)arg;
+    if (g_role && strcmp(g_role, "SINK") == 0) {
+        re_printf("SINK_METRICS5s rx_frames=%u drops=%u\n", g_sink_m.frames1s, g_sink_m.drops1s);
+        fflush(NULL);
+        g_sink_m.frames1s = 0; g_sink_m.drops1s = 0;
+    }
+    tmr_start(&g_sink_m_tmr, 5000, sink_metrics_tick, NULL);
 }

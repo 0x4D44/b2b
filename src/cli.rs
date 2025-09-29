@@ -10,13 +10,38 @@ pub enum RoleKind {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum LogFormat { Text, Json }
+pub enum LogFormat {
+    Text,
+    Json,
+}
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum ColorChoice { Auto, Always, Never }
+pub enum ColorChoice {
+    Auto,
+    Always,
+    Never,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum BufferMode {
+    Fixed,
+    Adaptive,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum JbufType {
+    Off,
+    Fixed,
+    Adaptive,
+}
 
 #[derive(Parser, Debug)]
-#[command(name = "b2b", version, about = "SIP/RTP audio roles and orchestrator", disable_help_subcommand = true)]
+#[command(
+    name = "b2b",
+    version,
+    about = "SIP/RTP audio roles and orchestrator",
+    disable_help_subcommand = true
+)]
 pub struct Cli {
     /// Role to run
     #[arg(long, value_enum)]
@@ -58,6 +83,25 @@ pub struct Cli {
     // Sink
     #[arg(long, default_value = "aplay -f S16_LE -r 8000 -c 1 -t raw")]
     pub aplay_cmd: String,
+
+    // Sink buffers (playout + RTP jitter)
+    #[arg(long, default_value_t = 120)]
+    pub sink_buffer_min_ms: u32,
+
+    #[arg(long, default_value_t = 240)]
+    pub sink_buffer_max_ms: u32,
+
+    #[arg(long, default_value = "adaptive", value_enum)]
+    pub sink_buffer_mode: BufferMode,
+
+    #[arg(long, default_value_t = 120)]
+    pub sink_jbuf_min_ms: u32,
+
+    #[arg(long, default_value_t = 200)]
+    pub sink_jbuf_max_ms: u32,
+
+    #[arg(long, default_value = "adaptive", value_enum)]
+    pub sink_jbuf_type: JbufType,
 
     // Mixer
     #[arg(long, default_value = "123#")]

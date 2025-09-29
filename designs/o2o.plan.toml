@@ -1,10 +1,12 @@
 [topology]
 # Sink runs on all interfaces for container environments.
 sink.sip_bind   = "0.0.0.0:5062"
-# Use a blackhole by default so ALSA is not required. Replace with
-# "aplay -f S16_LE -r 8000 -c 1" if you have ALSA.
 # Play out via ALSA (change device/format if needed).
-sink.aplay_cmd  = "tee /tmp/sink.pcm > /dev/null"
+# For headless/debugging you can switch this to the blackhole:
+#   sink.aplay_cmd = "tee /tmp/sink.pcm > /dev/null"
+# Larger ALSA buffers (optional) can reduce underruns:
+#   aplay -f S16_LE -r 8000 -c 1 -t raw -B 200000 -A 100000
+sink.aplay_cmd  = "aplay -f S16_LE -r 8000 -c 1 -t raw"
 
 # Replace the IP below with your host/interface IP if different.
 source.sip_target = "sip:172.29.166.112:5062"
