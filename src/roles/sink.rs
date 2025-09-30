@@ -3,7 +3,7 @@ use crate::{
     logging,
 };
 use anyhow::{Context, Result};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::{
     io::Write,
     process::{Child, Command, Stdio},
@@ -11,6 +11,7 @@ use std::{
 
 static RX_SAMPLES: AtomicU64 = AtomicU64::new(0);
 static FIRST_PCM: AtomicBool = AtomicBool::new(false);
+static SINK_PCM_USER: AtomicPtr<std::os::raw::c_void> = AtomicPtr::new(std::ptr::null_mut());
 use crate::{sip::UaHandle, sip_shim};
 
 pub fn run(args: &Cli) -> Result<()> {
@@ -118,6 +119,7 @@ pub fn run(args: &Cli) -> Result<()> {
             }
         }
         let user_ptr = Box::into_raw(Box::new(tx)) as *mut _;
+        SINK_PCM_USER.store(user_ptr, Ordering::Release);
         sip_shim::sink_set_pcm_callback(on_pcm, user_ptr)?;
     }
 
@@ -148,6 +150,17 @@ pub fn run(args: &Cli) -> Result<()> {
     let _ = sip_shim::sink_shutdown();
     let _ = ua.reactor.shutdown();
     let _ = aplay.kill();
+
+    // Free the boxed SyncSender to prevent memory leak
+    let user_ptr = SINK_PCM_USER.swap(std::ptr::null_mut(), Ordering::Acquire);
+    if !user_ptr.is_null() {
+        unsafe {
+            use std::sync::mpsc::SyncSender;
+            let _boxed = Box::from_raw(user_ptr as *mut SyncSender<Vec<u8>>);
+            // Drop occurs here automatically, closing the channel
+        }
+    }
+
     Ok(())
 }
 

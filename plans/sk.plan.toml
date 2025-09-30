@@ -1,0 +1,22 @@
+[topology]
+# Source → Sink: simplest loopback pipeline
+
+# Sink listens on all interfaces (container‑friendly). Override to 127.0.0.1 if preferred.
+sink.sip_bind      = "0.0.0.0:5062"
+# Play out via ALSA; adjust device/format if needed. For headless, you can switch to a blackhole:
+#   tee /tmp/sink.pcm > /dev/null
+sink.aplay_cmd     = "aplay -f S16_LE -r 8000 -c 1 -t raw"
+
+# Optional: playout/jitter buffer tuning exposed by the Sink role
+sink.buffer_min_ms = 120
+sink.buffer_max_ms = 240
+sink.buffer_mode   = "adaptive"   # fixed|adaptive
+sink.jbuf_min_ms   = 120
+sink.jbuf_max_ms   = 200
+sink.jbuf_type     = "adaptive"   # off|fixed|adaptive
+
+# Source dials the Sink. YOUR_HOST_IP is auto‑resolved by the orchestrator at runtime.
+source.sip_target  = "sip:YOUR_HOST_IP:5062"
+source.audio_file  = "./assets/sample.mp3"
+source.preroll_ms  = 120
+

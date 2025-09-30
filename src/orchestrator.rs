@@ -230,10 +230,10 @@ fn load_plan(path: &PathBuf) -> Result<PlanTopology> {
     // Replace placeholders like YOUR_HOST_IP / YOUR_IP in plan values
     if let Some(ip) = detect_host_ipv4() {
         let replace = |opt: &mut Option<String>| {
-            if let Some(v) = opt.as_mut()
-                && (v.contains("YOUR_HOST_IP") || v.contains("YOUR_IP"))
-            {
-                *v = v.replace("YOUR_HOST_IP", &ip).replace("YOUR_IP", &ip);
+            if let Some(v) = opt.as_mut() {
+                if v.contains("YOUR_HOST_IP") || v.contains("YOUR_IP") {
+                    *v = v.replace("YOUR_HOST_IP", &ip).replace("YOUR_IP", &ip);
+                }
             }
         };
         replace(&mut topo.source_target);
@@ -248,16 +248,16 @@ fn detect_host_ipv4() -> Option<String> {
     use std::net::{IpAddr, UdpSocket};
     let sock = UdpSocket::bind(("0.0.0.0", 0)).ok()?;
     let _ = sock.connect(("8.8.8.8", 80));
-    if let Ok(addr) = sock.local_addr()
-        && let IpAddr::V4(ip4) = addr.ip()
-    {
-        return Some(ip4.to_string());
+    if let Ok(addr) = sock.local_addr() {
+        if let IpAddr::V4(ip4) = addr.ip() {
+            return Some(ip4.to_string());
+        }
     }
     let _ = sock.connect(("1.1.1.1", 80));
-    if let Ok(addr) = sock.local_addr()
-        && let IpAddr::V4(ip4) = addr.ip()
-    {
-        return Some(ip4.to_string());
+    if let Ok(addr) = sock.local_addr() {
+        if let IpAddr::V4(ip4) = addr.ip() {
+            return Some(ip4.to_string());
+        }
     }
     None
 }
@@ -319,6 +319,24 @@ fn print_plan_cmds(topo: &PlanTopology, _args: &Cli) {
         let mut cmd = format!("dry-run: {exe} --role sink --sip-bind {bind}");
         if let Some(ap) = topo.sink_aplay_cmd.as_deref() {
             cmd.push_str(&format!(" --aplay-cmd \"{}\"", ap));
+        }
+        if let (Some(min), Some(max)) = (topo.sink_buffer_min_ms, topo.sink_buffer_max_ms) {
+            cmd.push_str(&format!(
+                " --sink-buffer-min-ms {} --sink-buffer-max-ms {}",
+                min, max
+            ));
+        }
+        if let Some(mode) = topo.sink_buffer_mode.as_deref() {
+            cmd.push_str(&format!(" --sink-buffer-mode {}", mode));
+        }
+        if let (Some(min), Some(max)) = (topo.sink_jbuf_min_ms, topo.sink_jbuf_max_ms) {
+            cmd.push_str(&format!(
+                " --sink-jbuf-min-ms {} --sink-jbuf-max-ms {}",
+                min, max
+            ));
+        }
+        if let Some(jt) = topo.sink_jbuf_type.as_deref() {
+            cmd.push_str(&format!(" --sink-jbuf-type {}", jt));
         }
         logging::println_tag(&orch, &cmd);
     }

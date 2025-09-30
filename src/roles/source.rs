@@ -114,6 +114,31 @@ pub fn run(args: &Cli) -> Result<()> {
     let _ = sip_shim::source_tx_enable(true);
     logging::ready_line("source", target, &args.codec, args.ptime_ms);
 
+    // Start metrics thread before main loop
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    let metrics_handle = {
+        let tag = logging::role_tag("source");
+        std::thread::spawn(move || {
+            let mut last = 0u64;
+            loop {
+                match stop_rx.recv_timeout(Duration::from_secs(5)) {
+                    Ok(_) => break, // Stop signal received
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        let now = TX_SAMPLES.load(Ordering::Relaxed);
+                        let delta = now.saturating_sub(last);
+                        last = now;
+                        let frames = delta / 160;
+                        logging::println_tag(
+                            &tag,
+                            &format!("tx_samples={} (+{}), tx_frames+{}", now, delta, frames),
+                        );
+                    }
+                    Err(_) => break, // Channel disconnected
+                }
+            }
+        })
+    };
+
     // Maintain a healthy backlog in C-side aubuf; let C ausrc pace RTP
     let target_backlog_ms: u32 = (args.prebuffer_ms).min(500); // avoid excessive memory
     loop {
@@ -138,24 +163,9 @@ pub fn run(args: &Cli) -> Result<()> {
         }
     }
 
-    // Periodic metrics log
-    {
-        let tag = logging::role_tag("source");
-        std::thread::spawn(move || {
-            let mut last = 0u64;
-            loop {
-                std::thread::sleep(std::time::Duration::from_secs(5));
-                let now = TX_SAMPLES.load(Ordering::Relaxed);
-                let delta = now.saturating_sub(last);
-                last = now;
-                let frames = delta / 160;
-                logging::println_tag(
-                    &tag,
-                    &format!("tx_samples={} (+{}), tx_frames+{}", now, delta, frames),
-                );
-            }
-        });
-    }
+    // Stop metrics thread gracefully
+    drop(stop_tx); // Signal thread to stop
+    let _ = metrics_handle.join();
 
     logging::println_tag(&tag, "shutdown");
     Ok(())
@@ -163,9 +173,15 @@ pub fn run(args: &Cli) -> Result<()> {
 
 fn ctrlc_tripped() -> bool {
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Once;
     static HIT: AtomicBool = AtomicBool::new(false);
-    let _ = ctrlc::set_handler(|| {
-        HIT.store(true, Ordering::SeqCst);
+    static INIT: Once = Once::new();
+
+    INIT.call_once(|| {
+        let _ = ctrlc::set_handler(|| {
+            HIT.store(true, Ordering::SeqCst);
+        });
     });
+
     HIT.load(Ordering::SeqCst)
 }

@@ -1,0 +1,10 @@
+[topology]
+source.sip_target = "sip:127.0.0.1:5063"
+source.audio_file = "./sample.mp3"
+
+mixer.sip_bind = "127.0.0.1:5063"
+mixer.sip_target = "sip:127.0.0.1:5062"
+mixer.dtmf_seq = "123#"
+
+sink.sip_bind = "127.0.0.1:5062"
+

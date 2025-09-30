@@ -1,0 +1,26 @@
+[topology]
+# Source → Mixer → Sink: mixed audio (program + DTMF)
+
+# Sink (server leg terminator)
+sink.sip_bind      = "0.0.0.0:5062"
+sink.aplay_cmd     = "aplay -f S16_LE -r 8000 -c 1 -t raw"
+sink.buffer_min_ms = 120
+sink.buffer_max_ms = 240
+sink.buffer_mode   = "adaptive"
+sink.jbuf_min_ms   = 120
+sink.jbuf_max_ms   = 200
+sink.jbuf_type     = "adaptive"
+
+# Mixer (accepts from Source; dials Sink)
+mixer.sip_bind     = "0.0.0.0:5063"
+mixer.sip_target   = "sip:YOUR_HOST_IP:5062"
+mixer.dtmf_seq     = "+442083661177"  # modem‑like dialing pattern; '+' = long pause
+mixer.dtmf_period_ms = 200              # tone duration per digit
+mixer.mix_gain_in    = 0.70             # program audio gain
+mixer.mix_gain_dtmf  = 0.50             # DTMF gain
+
+# Source (dials the Mixer)
+source.sip_target  = "sip:YOUR_HOST_IP:5063"
+source.audio_file  = "./assets/sample.mp3"
+source.preroll_ms  = 120
+
